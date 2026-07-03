@@ -19,6 +19,7 @@ import (
 const (
 	wsURL           = "wss://radar-map.ru/ws"
 	recentThreshold = 10 * time.Minute
+	pingInterval    = 30 * time.Second
 )
 
 var keywords = []string{
@@ -75,6 +76,25 @@ func main() {
 		log.Fatal("CHAT_ID не задан")
 	}
 
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
+
+	startMessage := fmt.Sprintf(
+		"Сервис radar запущен.\n\n"+
+			"Сервер: %s\n"+
+			"Время: %s",
+		hostname,
+		time.Now().Format("02.01.2006 15:04:05"),
+	)
+
+	if err := sendTelegram(startMessage); err != nil {
+		log.Println("Не удалось отправить сообщение о запуске:", err)
+	} else {
+		log.Println("Отправлено сообщение о запуске.")
+	}
+
 	for {
 		connect()
 
@@ -100,6 +120,29 @@ func connect() {
 	defer conn.Close()
 
 	log.Println("Подключено.")
+
+	conn.SetReadDeadline(time.Now().Add(2 * pingInterval))
+
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(2 * pingInterval))
+		return nil
+	})
+
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			err := conn.WriteControl(
+				websocket.PingMessage,
+				[]byte{},
+				time.Now().Add(5*time.Second),
+			)
+			if err != nil {
+				return
+			}
+		}
+	}()
 
 	for {
 
