@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 
 	"github.com/gorilla/websocket"
 )
@@ -24,7 +29,11 @@ var keywords = []string{
 	"калужская область",
 }
 
-var seen = make(map[string]struct{})
+var (
+	seen     = make(map[string]struct{})
+	botToken string
+	chatID   string
+)
 
 type Region struct {
 	Name        string `json:"name"`
@@ -45,8 +54,29 @@ type DeltaMessage struct {
 	} `json:"patch"`
 }
 
+type TelegramMessage struct {
+	ChatID string `json:"chat_id"`
+	Text   string `json:"text"`
+}
+
 func main() {
-	log.SetFlags(0)
+
+	if err := godotenv.Load(); err != nil {
+		log.Println(".env не найден, использую переменные окружения")
+	}
+
+	log.SetFlags(log.LstdFlags)
+
+	botToken = os.Getenv("BOT_TOKEN")
+	chatID = os.Getenv("CHAT_ID")
+
+	if botToken == "" {
+		log.Fatal("BOT_TOKEN не задан")
+	}
+
+	if chatID == "" {
+		log.Fatal("CHAT_ID не задан")
+	}
 
 	for {
 		connect()
@@ -59,6 +89,7 @@ func main() {
 }
 
 func connect() {
+
 	header := http.Header{}
 	header.Set("Origin", "https://radar-map.ru")
 	header.Set("User-Agent", "Mozilla/5.0")
@@ -74,6 +105,7 @@ func connect() {
 	log.Println("Подключено.")
 
 	for {
+
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			log.Println(err)
@@ -85,6 +117,7 @@ func connect() {
 }
 
 func handleMessage(data []byte) {
+
 	var meta struct {
 		Type string `json:"type"`
 	}
@@ -104,6 +137,7 @@ func handleMessage(data []byte) {
 }
 
 func handleState(data []byte) {
+
 	var state StateMessage
 
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -119,17 +153,16 @@ func handleState(data []byte) {
 		}
 
 		id := makeID(region)
-
 		seen[id] = struct{}{}
 
-		// выводим только события последних 10 минут
 		if now-region.LastEventTS <= int64(recentThreshold.Seconds()) {
-			printRegion(region)
+			notify(region)
 		}
 	}
 }
 
 func handleDelta(data []byte) {
+
 	var delta DeltaMessage
 
 	if err := json.Unmarshal(data, &delta); err != nil {
@@ -141,6 +174,7 @@ func handleDelta(data []byte) {
 		for _, region := range events {
 
 			process(region)
+
 		}
 	}
 }
@@ -159,14 +193,14 @@ func process(region Region) {
 
 	seen[id] = struct{}{}
 
-	printRegion(region)
+	notify(region)
 }
 
 func makeID(region Region) string {
 	return fmt.Sprintf("%s_%d", region.Key, region.LastEventTS)
 }
 
-func printRegion(region Region) {
+func notify(region Region) {
 
 	text := strings.ToLower(region.SourceText)
 
@@ -176,12 +210,52 @@ func printRegion(region Region) {
 			continue
 		}
 
-		fmt.Println("============================================================")
-		fmt.Println(region.SourceText)
-		fmt.Println("Получено:", time.Now().Format("02.01.2006 15:04:05"))
-		fmt.Println("============================================================")
-		fmt.Println()
+		msg := fmt.Sprintf(
+			"%s\n\nПолучено: %s",
+			region.SourceText,
+			time.Now().Format("02.01.2006 15:04:05"),
+		)
+
+		if err := sendTelegram(msg); err != nil {
+			log.Println(err)
+			return
+		}
+
+		log.Printf("Отправлено: %s\n", region.Name)
 
 		return
 	}
+}
+
+func sendTelegram(text string) error {
+
+	req := TelegramMessage{
+		ChatID: chatID,
+		Text:   text,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(
+		fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken),
+		"application/json",
+		bytes.NewBuffer(body),
+	)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+
+		b, _ := io.ReadAll(resp.Body)
+
+		return fmt.Errorf("telegram error: %s", string(b))
+	}
+
+	return nil
 }
